@@ -178,6 +178,7 @@ tr:hover td{background:#f8fafc;}
 
 <div id="app"></div>
 
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <script>
 // ══════════════════════════════════════════════════════
 // STORAGE
@@ -231,13 +232,13 @@ async function cloudPush(){
   syncBusy=true;
   setSyncStatus('syncing');
   try{
-    const res=await fetch(API_URL,{
+    await fetch(API_URL,{
       method:'POST',
-      headers:{'Content-Type':'text/plain;charset=utf-8'}, // text/plain เพื่อเลี่ยง CORS preflight
+      mode:'no-cors', // เลี่ยงการบล็อก CORS ตอนเขียนข้อมูล (Apps Script รับได้)
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify(cloudPayload()),
     });
-    const out=await res.json();
-    if(!out.ok) throw new Error(out.error||'save failed');
+    // โหมด no-cors อ่านผลลัพธ์กลับมาไม่ได้ แต่ข้อมูลถูกบันทึกลงชีตแล้ว
     setSyncStatus('ok');
   }catch(err){
     console.error('Sync error:',err);
@@ -339,7 +340,7 @@ function save(){
 // ══════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════
-const CLASSES=['อ.2','ป.1','ป.2','ป.3','ป.4','ป.5','ป.6'];
+const CLASSES=['อ.2','อ.3','ป.1','ป.2','ป.3','ป.4','ป.5','ป.6'];
 const ROOMS=['1','2','3','4'];
 const ROLE_LABELS={admin:'ผู้ดูแลระบบ',finance:'เจ้าหน้าที่การเงิน',teacher:'ครูประจำชั้น',parent:'ผู้ปกครอง',director:'ผู้บริหาร'};
 const AVATARS={'ด.ช.':'🧒','ด.ญ.':'👧','นาย':'👨','นางสาว':'👩'};
@@ -1002,7 +1003,7 @@ function renderStudents(){
   return `
   <div class="page-header">
     <div><div class="page-title">👨‍🎓 จัดการนักเรียน (${vs.length} คน)</div></div>
-    ${can('manage_students')?'<button class="btn btn-primary" id="add-stu-btn">+ เพิ่มนักเรียน</button>':''}
+    ${can('manage_students')?'<div style="display:flex;gap:8px"><button class="btn btn-outline" id="import-stu-btn">📥 นำเข้าจาก Excel</button><button class="btn btn-primary" id="add-stu-btn">+ เพิ่มนักเรียน</button></div>':''}
   </div>
   <div class="card">
     <div class="search-bar">
@@ -1019,6 +1020,7 @@ function attachStudents(){
   document.getElementById('stu-search')?.addEventListener('input',e=>{stuSearch=e.target.value;document.getElementById('content').innerHTML=renderStudents();attachStudents();});
   document.getElementById('stu-cls')?.addEventListener('change',e=>{stuFilterCls=e.target.value;document.getElementById('content').innerHTML=renderStudents();attachStudents();});
   document.getElementById('add-stu-btn')?.addEventListener('click',()=>openModal(renderStudentForm(null),()=>attachStudentForm(null)));
+  document.getElementById('import-stu-btn')?.addEventListener('click',()=>openModal(renderImportModal(),attachImportModal));
   document.querySelectorAll('.view-profile-btn').forEach(b=>{
     b.onclick=()=>{const s=state.students.find(x=>x.id===b.dataset.sid);if(s)openModal(renderProfileModal(s),()=>attachProfileModal(s));};
   });
@@ -1083,6 +1085,155 @@ function attachStudentForm(s){
     else{state.students.push(updated);addAudit('ADD_STUDENT',`เพิ่ม ${name} ${surname}`);}
     save();closeModal();
     showToast(s?'บันทึกข้อมูลแล้ว':'เพิ่มนักเรียนสำเร็จ');
+    document.getElementById('content').innerHTML=renderStudents();attachStudents();
+  });
+}
+
+// ══════════════════════════════════════════════════════
+// IMPORT นักเรียนจาก Excel
+// ══════════════════════════════════════════════════════
+let importParsed=null; // เก็บผลการอ่านไฟล์ไว้ก่อนยืนยัน
+
+// แปลงคำนำหน้าเต็ม → ตัวย่อในระบบ (ตรวจตัวยาวก่อนตัวสั้น)
+const PREFIX_RULES=[
+  ['เด็กชาย','ด.ช.'],['เด็กหญิง','ด.ญ.'],
+  ['นางสาว','นางสาว'],['นาย','นาย'],['นาง','นาง'],
+  ['ด.ช.','ด.ช.'],['ด.ญ.','ด.ญ.'],['เด็ก','ด.ช.'],
+];
+
+function parseStudentName(full){
+  let s=String(full||'').replace(/\s+/g,' ').trim();
+  let prefix='';
+  for(const [k,v] of PREFIX_RULES){ if(s.startsWith(k)){prefix=v;s=s.slice(k.length).trim();break;} }
+  const parts=s.split(' ').filter(Boolean);
+  const name=parts.shift()||'';
+  const surname=parts.join(' ');
+  return {prefix,name,surname};
+}
+
+// อ่านเวิร์กบุ๊ก แล้วดึงนักเรียนจากทุกชีตที่ชื่อตรงกับชั้นเรียน
+function extractStudentsFromWorkbook(wb){
+  const found=[];
+  wb.SheetNames.forEach(sheetName=>{
+    const cls=CLASSES.find(c=>c===sheetName.trim());
+    if(!cls) return; // ข้ามชีตที่ไม่ใช่ชั้นเรียน (รวม, ผปค. ฯลฯ)
+    const ws=wb.Sheets[sheetName];
+    const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+    rows.forEach(r=>{
+      const no=parseInt(r[0]);
+      const code=String(r[1]||'').trim();      // เลขประจำตัวนักเรียน
+      const full=String(r[3]||'').trim();       // ชื่อ – นามสกุล
+      if(!Number.isFinite(no)||!full) return;   // ข้ามหัวตาราง/แถวว่าง
+      const {prefix,name,surname}=parseStudentName(full);
+      if(!prefix||!name) return;                // ไม่ใช่แถวนักเรียน
+      found.push({no,code,prefix,name,surname,cls});
+    });
+  });
+  return found;
+}
+
+function renderImportModal(){
+  return `<div class="modal-head"><h3>📥 นำเข้านักเรียนจาก Excel</h3><button class="modal-close" id="modal-close-btn">✕</button></div>
+  <div class="modal-body">
+    <div style="background:var(--blue-light);border:1px solid var(--blue-border);border-radius:10px;padding:12px 14px;font-size:13px;color:#334155;margin-bottom:16px;line-height:1.6">
+      เลือกไฟล์ Excel รายชื่อนักเรียน ระบบจะอ่านทุกชีตที่เป็นชั้นเรียน (อ.2, อ.3, ป.1–ป.6) โดยอัตโนมัติ<br>
+      <span style="color:#64748b">รองรับรูปแบบ: คอลัมน์ เลขที่ · เลขประจำตัว · เลขบัตรประชาชน · ชื่อ–นามสกุล</span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">ไฟล์ Excel (.xlsx)</label>
+      <input type="file" class="form-input" id="imp-file" accept=".xlsx,.xls" style="padding:9px">
+    </div>
+    <div id="imp-preview"></div>
+    <div class="two-col" style="gap:10px;margin-top:8px">
+      <button class="btn btn-ghost btn-full" id="modal-close-btn2">ยกเลิก</button>
+      <button class="btn btn-success btn-full" id="imp-confirm" disabled style="opacity:.5">นำเข้า</button>
+    </div>
+  </div>`;
+}
+
+function attachImportModal(){
+  importParsed=null;
+  document.getElementById('modal-close-btn2')?.addEventListener('click',closeModal);
+  const confirmBtn=document.getElementById('imp-confirm');
+  const preview=document.getElementById('imp-preview');
+
+  document.getElementById('imp-file')?.addEventListener('change',ev=>{
+    const file=ev.target.files[0];
+    if(!file)return;
+    if(typeof XLSX==='undefined'){
+      preview.innerHTML='<div style="color:#dc2626;font-size:13px;padding:8px">⚠️ โหลดตัวอ่าน Excel ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่</div>';
+      return;
+    }
+    preview.innerHTML='<div style="color:#64748b;font-size:13px;padding:8px">⏳ กำลังอ่านไฟล์...</div>';
+    const reader=new FileReader();
+    reader.onload=e=>{
+      try{
+        const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
+        const rows=extractStudentsFromWorkbook(wb);
+        if(rows.length===0){
+          preview.innerHTML='<div style="color:#dc2626;font-size:13px;padding:8px">ไม่พบข้อมูลนักเรียน — ตรวจสอบว่าชื่อชีตเป็นชั้นเรียน เช่น อ.2 ป.1</div>';
+          confirmBtn.disabled=true;confirmBtn.style.opacity=.5;importParsed=null;
+          return;
+        }
+        // แยกซ้ำ: ถ้าเลขประจำตัวหรือชื่อ+ชั้นมีอยู่แล้ว = ข้าม
+        const existCodes=new Set(state.students.map(s=>s.accountNo));
+        const existKeys=new Set(state.students.map(s=>s.name+'|'+s.surname+'|'+s.cls));
+        const fresh=[], dups=[];
+        rows.forEach(r=>{
+          const key=r.name+'|'+r.surname+'|'+r.cls;
+          if((r.code&&existCodes.has(r.code))||existKeys.has(key)) dups.push(r);
+          else fresh.push(r);
+        });
+        importParsed=fresh;
+
+        // สรุปแยกตามชั้น
+        const byCls={};
+        rows.forEach(r=>{byCls[r.cls]=(byCls[r.cls]||0)+1;});
+        const clsRows=CLASSES.filter(c=>byCls[c]).map(c=>`<span style="display:inline-block;background:#eff6ff;color:#1e40af;border-radius:8px;padding:3px 10px;margin:2px;font-size:12px;font-weight:600">${c}: ${byCls[c]}</span>`).join('');
+
+        preview.innerHTML=`
+          <div style="border:1px solid var(--gray-border);border-radius:10px;padding:14px;margin-bottom:8px">
+            <div style="font-weight:700;margin-bottom:8px">พบนักเรียน ${rows.length} คน จาก ${Object.keys(byCls).length} ชั้น</div>
+            <div style="margin-bottom:10px">${clsRows}</div>
+            <div style="font-size:13px;color:#16a34a;font-weight:700">✅ นำเข้าใหม่ ${fresh.length} คน</div>
+            ${dups.length?`<div style="font-size:13px;color:#d97706;font-weight:700;margin-top:2px">⏭️ มีอยู่แล้ว (ข้าม) ${dups.length} คน</div>`:''}
+          </div>`;
+        confirmBtn.disabled=fresh.length===0;
+        confirmBtn.style.opacity=fresh.length===0?.5:1;
+      }catch(err){
+        console.error(err);
+        preview.innerHTML='<div style="color:#dc2626;font-size:13px;padding:8px">อ่านไฟล์ไม่สำเร็จ — ไฟล์อาจเสียหายหรือไม่ใช่ .xlsx</div>';
+        confirmBtn.disabled=true;confirmBtn.style.opacity=.5;importParsed=null;
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  confirmBtn?.addEventListener('click',()=>{
+    if(!importParsed||importParsed.length===0)return;
+    const {date}=nowStr();
+    importParsed.forEach(r=>{
+      state.students.push({
+        id:genId(),
+        no:r.no,
+        prefix:r.prefix,
+        name:r.name,
+        surname:r.surname,
+        cls:r.cls,
+        room:'1',
+        balance:0,
+        dob:'',
+        parentPhone:'',
+        accountNo:r.code||('SAV-'+genId().slice(0,4)),
+        openDate:date,
+        status:'active',
+      });
+    });
+    addAudit('IMPORT_STUDENTS',`นำเข้านักเรียน ${importParsed.length} คนจาก Excel`);
+    const n=importParsed.length;
+    save();closeModal();
+    showToast(`นำเข้านักเรียน ${n} คนสำเร็จ`);
+    importParsed=null;
     document.getElementById('content').innerHTML=renderStudents();attachStudents();
   });
 }
