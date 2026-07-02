@@ -345,11 +345,35 @@ const ROOMS=['1','2','3','4'];
 const ROLE_LABELS={admin:'ผู้ดูแลระบบ',finance:'เจ้าหน้าที่การเงิน',teacher:'ครูประจำชั้น',parent:'ผู้ปกครอง',director:'ผู้บริหาร'};
 const AVATARS={'ด.ช.':'🧒','ด.ญ.':'👧','นาย':'👨','นางสาว':'👩'};
 
+// ── วันเวลาแบบไทย (เขตเวลา Asia/Bangkok + ปีพุทธศักราช) ──
+const TH_MONTHS_FULL=['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+const TH_MONTHS_SHORT=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+function thParts(d){
+  const f=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+  const p={};f.formatToParts(d).forEach(x=>{if(x.type!=='literal')p[x.type]=x.value;});
+  return {y:+p.year,m:+p.month,d:+p.day,hh:p.hour==='24'?'00':p.hour,mm:p.minute};
+}
+function fmtDate(d){const p=thParts(d);return String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0')+'/'+(p.y+543);}       // 02/07/2569
+function fmtDateLong(d){const p=thParts(d);return p.d+' '+TH_MONTHS_FULL[p.m-1]+' '+(p.y+543);}                                  // 2 กรกฎาคม 2569
+function fmtTime(d){const p=thParts(d);return p.hh+':'+p.mm+' น.';}                                                              // 17:02 น.
+function todayInput(){const p=thParts(new Date());return p.y+'-'+String(p.m).padStart(2,'0')+'-'+String(p.d).padStart(2,'0');}   // yyyy-mm-dd (สำหรับ input type=date)
+// แปลงค่าจาก <input type="date"> (yyyy-mm-dd) → {ts, date(พ.ศ.)}
+function fromInputDate(val){
+  const [y,mo,da]=String(val).split('-').map(Number);
+  if(!y||!mo||!da){const n=new Date();return {ts:n.getTime(),date:fmtDate(n)};}
+  const d=new Date(y,mo-1,da,12,0,0);
+  return {ts:d.getTime(), date:String(da).padStart(2,'0')+'/'+String(mo).padStart(2,'0')+'/'+(y+543)};
+}
+// หา timestamp ของรายการ (รองรับข้อมูลเก่าที่ไม่มี ts โดยแปลงจากวันที่ พ.ศ.)
+function txTs(t){
+  if(t.ts)return t.ts;
+  const m=String(t.date||'').split('/');
+  if(m.length===3){const d=+m[0],mo=+m[1],y=(+m[2])-543;const dt=new Date(y,mo-1,d,12,0,0);if(!isNaN(dt.getTime()))return dt.getTime();}
+  return 0;
+}
 function nowStr(){
   const d=new Date();
-  const date=d.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit',year:'numeric'});
-  const time=d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
-  return {date,time,ts:d.getTime()};
+  return {date:fmtDate(d),time:fmtTime(d),ts:d.getTime()};
 }
 function genId(){return Math.random().toString(36).slice(2,10).toUpperCase();}
 function money(n){return '฿'+(n||0).toLocaleString('th-TH');}
@@ -363,6 +387,7 @@ function can(action){
     withdraw_approve:['admin','finance'],
     manage_students:['admin','finance'],
     manage_users:['admin'],
+    edit_transaction:['admin','finance'],
     view_reports:['admin','finance','director','teacher'],
   };
   return (map[action]||[]).includes(r);
@@ -436,7 +461,7 @@ function renderLogin(){
       <div class="login-logo">
         <span class="emoji">🏦</span>
         <h1>ระบบออมเงินนักเรียน</h1>
-        <p>โรงเรียนบ้านบ้านนิคมสายโท 12 เหนือ • ปีการศึกษา 2568</p>
+        <p>โรงเรียนบ้านนิคมสายโท 12 เหนือ • ปีการศึกษา 2569</p>
       </div>
       <div class="form-group">
         <label class="form-label">ชื่อผู้ใช้งาน</label>
@@ -553,7 +578,7 @@ function attachPage(){
     case 'withdraw':  attachWithdraw();break;
     case 'students':  attachStudents();break;
     case 'history':   attachHistory();break;
-    case 'reports':   break;
+    case 'reports':   attachReports();break;
     case 'users':     attachUsers();break;
     case 'audit':     break;
   }
@@ -613,7 +638,7 @@ function renderDashboard(){
   return `
   <div class="page-header">
     <div><div class="page-title">ภาพรวมระบบออมเงิน</div>
-    <div class="page-sub">${today} • ${state.session.name}</div></div>
+    <div class="page-sub">${fmtDateLong(new Date())} • ${state.session.name}</div></div>
   </div>
   <div class="stat-grid">
     <div class="stat-card"><div class="icon">💰</div><div class="val">${money(total)}</div><div class="lbl">ยอดออมทั้งหมด</div></div>
@@ -649,6 +674,7 @@ let depositSelectedId=null;
 let depositAmount='';
 let depositNote='';
 let depositSearch='';
+let depositDate=todayInput();
 let batchCls='ป.4';
 let batchRoom='1';
 
@@ -704,6 +730,11 @@ function renderDeposit(){
       <div style="font-size:15px;font-weight:700;margin-bottom:14px">บันทึกการฝาก</div>
       ${selectedBox}
       <div class="form-group">
+        <label class="form-label">วันที่ฝาก <span class="req">*</span></label>
+        <input type="date" class="form-input" id="dep-date" value="${depositDate}">
+        <div style="font-size:11px;color:#94a3b8;margin-top:3px">เลือกย้อนหลังหรือล่วงหน้าได้ (ค่าเริ่มต้น = วันนี้)</div>
+      </div>
+      <div class="form-group">
         <label class="form-label">จำนวนเงิน (บาท) <span class="req">*</span></label>
         <input type="number" class="amount-big" id="dep-amount" placeholder="0" min="1" value="${depositAmount}">
       </div>
@@ -754,6 +785,8 @@ function attachDeposit(){
     });
     const noteInput=document.getElementById('dep-note');
     noteInput?.addEventListener('input',()=>{depositNote=noteInput.value;});
+    const dateInput=document.getElementById('dep-date');
+    dateInput?.addEventListener('change',()=>{depositDate=dateInput.value;});
     document.getElementById('dep-submit')?.addEventListener('click',()=>{
       const vs=visibleStudents();
       const sel=vs.find(s=>s.id===depositSelectedId);
@@ -761,12 +794,14 @@ function attachDeposit(){
       const amt=Number(document.getElementById('dep-amount').value);
       const note=document.getElementById('dep-note').value;
       if(!amt||amt<=0){showToast('กรุณากรอกจำนวนเงิน',false);return;}
-      const {date,time}=nowStr();
-      state.transactions.unshift({id:genId(),studentId:sel.id,type:'deposit',amount:amt,note,by:state.session.name,date,time});
+      const dv=document.getElementById('dep-date').value||todayInput();
+      const {ts,date}=fromInputDate(dv);
+      const time=fmtTime(new Date());
+      state.transactions.unshift({id:genId(),studentId:sel.id,type:'deposit',amount:amt,note,by:state.session.name,date,time,ts});
       state.students=state.students.map(s=>s.id===sel.id?{...s,balance:s.balance+amt}:s);
-      addAudit('DEPOSIT',`ฝากเงิน ${money(amt)} → ${sel.name} ${sel.surname}`);
+      addAudit('DEPOSIT',`ฝากเงิน ${money(amt)} → ${sel.name} ${sel.surname} (${date})`);
       save();
-      depositSelectedId=null;depositAmount='';depositNote='';depositSearch='';
+      depositSelectedId=null;depositAmount='';depositNote='';depositSearch='';depositDate=todayInput();
       showToast(`ฝากเงิน ${money(amt)} สำเร็จ`);
       document.getElementById('content').innerHTML=renderDeposit();attachDeposit();
     });
@@ -793,6 +828,10 @@ function renderBatchModal(students){
       style="width:90px;padding:6px 10px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:14px;text-align:center;font-family:inherit"></td></tr>`).join('');
   return `<div class="modal-head"><h3>💰 ฝากเงินทั้งห้อง (${students.length} คน)</h3><button class="modal-close" id="modal-close-btn">✕</button></div>
   <div class="modal-body">
+    <div class="form-group">
+      <label class="form-label">วันที่ฝาก</label>
+      <input type="date" class="form-input" id="batch-date" value="${todayInput()}">
+    </div>
     <div class="table-wrap"><table><thead><tr><th>ที่</th><th>ชื่อ-นามสกุล</th><th>ยอดปัจจุบัน</th><th>จำนวนเงิน (฿)</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="confirm-box" id="batch-summary" style="margin-top:14px">
       <div class="confirm-row"><span>จำนวนที่กรอก</span><span id="batch-count">0 คน</span></div>
@@ -813,13 +852,15 @@ function attachBatchModal(students){
     const entries=[];
     document.querySelectorAll('.batch-amt').forEach(i=>{const v=Number(i.value);if(v>0)entries.push({studentId:i.dataset.sid,amount:v});});
     if(!entries.length){showToast('กรุณากรอกจำนวนเงินอย่างน้อย 1 คน',false);return;}
-    const {date,time}=nowStr();
+    const dv=document.getElementById('batch-date')?.value||todayInput();
+    const {ts,date}=fromInputDate(dv);
+    const time=fmtTime(new Date());
     entries.forEach(e=>{
       const s=students.find(x=>x.id===e.studentId);
-      state.transactions.unshift({id:genId(),studentId:e.studentId,type:'deposit',amount:e.amount,note:'ฝากพร้อมกัน',by:state.session.name,date,time});
+      state.transactions.unshift({id:genId(),studentId:e.studentId,type:'deposit',amount:e.amount,note:'ฝากพร้อมกัน',by:state.session.name,date,time,ts});
       state.students=state.students.map(x=>x.id===e.studentId?{...x,balance:x.balance+e.amount}:x);
     });
-    addAudit('BATCH_DEPOSIT',`ฝากพร้อมกัน ${entries.length} คน`);
+    addAudit('BATCH_DEPOSIT',`ฝากพร้อมกัน ${entries.length} คน (${date})`);
     save();closeModal();
     showToast(`บันทึกการฝาก ${entries.length} คนสำเร็จ`);
     document.getElementById('content').innerHTML=renderDeposit();attachDeposit();
@@ -954,8 +995,8 @@ function attachWithdraw(){
         const r=state.withdrawReqs.find(x=>x.id===b.dataset.id);
         if(!r)return;
         const s=state.students.find(x=>x.id===r.studentId);
-        const {date,time}=nowStr();
-        state.transactions.unshift({id:genId(),studentId:r.studentId,type:'withdraw',amount:r.amount,note:r.reason,by:state.session.name,date,time});
+        const {date,time,ts}=nowStr();
+        state.transactions.unshift({id:genId(),studentId:r.studentId,type:'withdraw',amount:r.amount,note:r.reason,by:state.session.name,date,time,ts});
         state.students=state.students.map(x=>x.id===r.studentId?{...x,balance:x.balance-r.amount}:x);
         state.withdrawReqs=state.withdrawReqs.map(x=>x.id===r.id?{...x,status:'approved',resolvedBy:state.session.name}:x);
         addAudit('WITHDRAW_APPROVE',`อนุมัติถอน ${money(r.amount)} จาก ${s?.name||r.studentId}`);
@@ -1305,6 +1346,7 @@ function renderHistory(){
     (state.session.role==='parent'?vs.some(s=>s.id===t.studentId):true)
   );
   const stuOpts=['<option value="">นักเรียนทั้งหมด</option>',...vs.map(s=>`<option value="${s.id}"${hStuId===s.id?' selected':''}>${s.prefix}${s.name} ${s.surname}</option>`)].join('');
+  const canEdit=can('edit_transaction');
   const rows=filt.map(t=>{
     const s=state.students.find(x=>x.id===t.studentId);
     return `<tr>
@@ -1315,8 +1357,12 @@ function renderHistory(){
       <td style="font-weight:800;color:${t.type==='deposit'?'#16a34a':'#dc2626'}">${t.type==='deposit'?'+':'-'}${money(t.amount)}</td>
       <td style="font-size:12px;color:#64748b">${t.note||'-'}</td>
       <td style="font-size:12px;color:#94a3b8">${t.by}</td>
+      ${canEdit?`<td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm edit-tx-btn" data-tid="${t.id}" style="margin-right:4px">✏️</button>
+        <button class="btn btn-ghost btn-sm del-tx-btn" data-tid="${t.id}" style="color:#dc2626">🗑️</button>
+      </td>`:''}
     </tr>`;
-  }).join('')||`<tr class="empty-row"><td colspan="8">ไม่มีรายการ</td></tr>`;
+  }).join('')||`<tr class="empty-row"><td colspan="${canEdit?9:8}">ไม่มีรายการ</td></tr>`;
 
   return `
   <div class="page-header"><div class="page-title">📋 ประวัติรายการ</div></div>
@@ -1333,7 +1379,7 @@ function renderHistory(){
     </div>
     <div style="font-size:13px;color:#64748b;margin-bottom:10px">แสดง ${filt.length} รายการ</div>
     <div class="table-wrap">
-      <table><thead><tr><th>วันที่</th><th>เวลา</th><th>นักเรียน</th><th>ชั้น</th><th>ประเภท</th><th>จำนวน</th><th>หมายเหตุ</th><th>บันทึกโดย</th></tr></thead>
+      <table><thead><tr><th>วันที่</th><th>เวลา</th><th>นักเรียน</th><th>ชั้น</th><th>ประเภท</th><th>จำนวน</th><th>หมายเหตุ</th><th>บันทึกโดย</th>${canEdit?'<th>จัดการ</th>':''}</tr></thead>
       <tbody>${rows}</tbody></table>
     </div>
   </div>`;
@@ -1343,11 +1389,120 @@ function attachHistory(){
   document.getElementById('h-stu')?.addEventListener('change',e=>{hStuId=e.target.value;document.getElementById('content').innerHTML=renderHistory();attachHistory();});
   document.getElementById('h-date')?.addEventListener('input',e=>{hDate=e.target.value;document.getElementById('content').innerHTML=renderHistory();attachHistory();});
   document.getElementById('h-reset')?.addEventListener('click',()=>{hType='';hDate='';hStuId='';document.getElementById('content').innerHTML=renderHistory();attachHistory();});
+  document.querySelectorAll('.edit-tx-btn').forEach(b=>{
+    b.onclick=()=>{const t=state.transactions.find(x=>x.id===b.dataset.tid);if(t)openModal(renderTxEditModal(t),()=>attachTxEditModal(t));};
+  });
+  document.querySelectorAll('.del-tx-btn').forEach(b=>{
+    b.onclick=()=>{
+      const t=state.transactions.find(x=>x.id===b.dataset.tid);
+      if(!t)return;
+      const s=state.students.find(x=>x.id===t.studentId);
+      if(!confirm(`ยืนยันลบรายการ${t.type==='deposit'?'ฝาก':'ถอน'} ${money(t.amount)}${s?' ของ '+s.name:''}?\nยอดเงินของนักเรียนจะถูกปรับกลับให้อัตโนมัติ`))return;
+      // ปรับยอดกลับ: ถ้าลบรายการฝาก ให้หักออก / ถ้าลบรายการถอน ให้คืนเข้า
+      if(s){
+        const delta=t.type==='deposit'?-t.amount:t.amount;
+        state.students=state.students.map(x=>x.id===s.id?{...x,balance:x.balance+delta}:x);
+      }
+      state.transactions=state.transactions.filter(x=>x.id!==t.id);
+      addAudit('DELETE_TX',`ลบรายการ${t.type==='deposit'?'ฝาก':'ถอน'} ${money(t.amount)}${s?' ของ '+s.name+' '+s.surname:''}`);
+      save();showToast('ลบรายการแล้ว');
+      document.getElementById('content').innerHTML=renderHistory();attachHistory();
+    };
+  });
+}
+
+function renderTxEditModal(t){
+  const s=state.students.find(x=>x.id===t.studentId);
+  // แปลงวันที่ พ.ศ. → yyyy-mm-dd สำหรับ input
+  let dv=todayInput();
+  const m=String(t.date||'').split('/');
+  if(m.length===3){const y=(+m[2])-543;dv=y+'-'+String(+m[1]).padStart(2,'0')+'-'+String(+m[0]).padStart(2,'0');}
+  return `<div class="modal-head"><h3>✏️ แก้ไขรายการ${t.type==='deposit'?'ฝาก':'ถอน'}</h3><button class="modal-close" id="modal-close-btn">✕</button></div>
+  <div class="modal-body">
+    <div class="info-box blue" style="border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px">
+      นักเรียน: <strong>${s?s.prefix+s.name+' '+s.surname:t.studentId}</strong>${s?` • ยอดปัจจุบัน ${money(s.balance)}`:''}
+    </div>
+    <div class="form-group">
+      <label class="form-label">วันที่</label>
+      <input type="date" class="form-input" id="tx-date" value="${dv}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">จำนวนเงิน (บาท) <span class="req">*</span></label>
+      <input type="number" class="form-input" id="tx-amount" value="${t.amount}" min="1">
+    </div>
+    <div class="form-group">
+      <label class="form-label">หมายเหตุ</label>
+      <input class="form-input" id="tx-note" value="${t.note||''}">
+    </div>
+    <div class="two-col" style="gap:10px;margin-top:8px">
+      <button class="btn btn-ghost btn-full" id="modal-close-btn2">ยกเลิก</button>
+      <button class="btn btn-success btn-full" id="tx-save">บันทึกการแก้ไข</button>
+    </div>
+  </div>`;
+}
+function attachTxEditModal(t){
+  document.getElementById('modal-close-btn2')?.addEventListener('click',closeModal);
+  document.getElementById('tx-save')?.addEventListener('click',()=>{
+    const newAmt=Number(document.getElementById('tx-amount').value);
+    if(!newAmt||newAmt<=0){showToast('กรุณากรอกจำนวนเงิน',false);return;}
+    const dv=document.getElementById('tx-date').value||todayInput();
+    const note=document.getElementById('tx-note').value;
+    const {ts,date}=fromInputDate(dv);
+    const s=state.students.find(x=>x.id===t.studentId);
+    // ปรับยอดตามส่วนต่าง: ฝาก → +ส่วนต่าง, ถอน → -ส่วนต่าง
+    if(s){
+      const diff=newAmt-t.amount;
+      const delta=t.type==='deposit'?diff:-diff;
+      state.students=state.students.map(x=>x.id===s.id?{...x,balance:x.balance+delta}:x);
+    }
+    state.transactions=state.transactions.map(x=>x.id===t.id?{...x,amount:newAmt,note,date,ts}:x);
+    addAudit('EDIT_TX',`แก้ไขรายการ${t.type==='deposit'?'ฝาก':'ถอน'} ${money(t.amount)}→${money(newAmt)}${s?' ('+s.name+')':''}`);
+    save();closeModal();
+    showToast('แก้ไขรายการแล้ว');
+    document.getElementById('content').innerHTML=renderHistory();attachHistory();
+  });
 }
 
 // ══════════════════════════════════════════════════════
 // REPORTS
 // ══════════════════════════════════════════════════════
+let reportPeriod='day'; // day | week | month
+
+// จัดกลุ่มรายการฝากตามช่วงเวลา → [{key,label,count,total,ts}] เรียงล่าสุดก่อน
+function groupDeposits(period){
+  const deps=state.transactions.filter(t=>t.type==='deposit');
+  const groups={};
+  deps.forEach(t=>{
+    const ts=txTs(t);
+    if(!ts)return;
+    const d=new Date(ts);
+    const p=thParts(d);
+    let key,label,sortTs;
+    if(period==='day'){
+      key=`${p.y}-${p.m}-${p.d}`;
+      label=`${p.d} ${TH_MONTHS_SHORT[p.m-1]} ${p.y+543}`;
+      sortTs=new Date(p.y,p.m-1,p.d).getTime();
+    }else if(period==='month'){
+      key=`${p.y}-${p.m}`;
+      label=`${TH_MONTHS_FULL[p.m-1]} ${p.y+543}`;
+      sortTs=new Date(p.y,p.m-1,1).getTime();
+    }else{ // week (จันทร์–อาทิตย์)
+      const base=new Date(p.y,p.m-1,p.d);
+      const dow=(base.getDay()+6)%7; // 0=จันทร์
+      const mon=new Date(base); mon.setDate(base.getDate()-dow);
+      const sun=new Date(mon); sun.setDate(mon.getDate()+6);
+      key=`${mon.getFullYear()}-${mon.getMonth()}-${mon.getDate()}`;
+      const mp=thParts(mon), sp=thParts(sun);
+      label=`${mp.d} ${TH_MONTHS_SHORT[mp.m-1]} – ${sp.d} ${TH_MONTHS_SHORT[sp.m-1]} ${sp.y+543}`;
+      sortTs=mon.getTime();
+    }
+    if(!groups[key])groups[key]={key,label,count:0,total:0,sortTs};
+    groups[key].count++;
+    groups[key].total+=t.amount;
+  });
+  return Object.values(groups).sort((a,b)=>b.sortTs-a.sortTs);
+}
+
 function renderReports(){
   const vs=visibleStudents();
   const totalBal=vs.reduce((a,s)=>a+s.balance,0);
@@ -1365,15 +1520,43 @@ function renderReports(){
     return `<div class="bar-col"><div class="bar-fill" style="height:${h}px;background:#16a34a" title="${money(c.balance)}"></div><div class="bar-lbl">${c.cls}</div></div>`;
   }).join('');
 
-  const top10=[...vs].sort((a,b)=>b.balance-a.balance).slice(0,10);
+  // ── รายงานฝากตามช่วงเวลา ──
+  const periodLabels={day:'รายวัน',week:'รายสัปดาห์',month:'รายเดือน'};
+  const groups=groupDeposits(reportPeriod);
+  const shown=groups.slice(0,30);
+  const periodTotal=groups.reduce((a,g)=>a+g.total,0);
+  const periodRows=shown.map(g=>`<tr>
+    <td style="font-weight:700">${g.label}</td>
+    <td style="text-align:center">${g.count}</td>
+    <td style="font-weight:800;color:#16a34a;text-align:right">${money(g.total)}</td>
+  </tr>`).join('')||`<tr class="empty-row"><td colspan="3">ยังไม่มีรายการฝาก</td></tr>`;
+
+  // ── Top 10 นักเรียนออมสม่ำเสมอ (นับจำนวนวันที่มีการฝาก) ──
+  const consistency=vs.map(s=>{
+    const deps=state.transactions.filter(t=>t.studentId===s.id&&t.type==='deposit');
+    const days=new Set(deps.map(t=>t.date)).size; // จำนวนวันที่ฝาก (ไม่นับซ้ำวัน)
+    const total=deps.reduce((a,t)=>a+t.amount,0);
+    return {s,days,count:deps.length,total};
+  }).filter(x=>x.days>0)
+    .sort((a,b)=>b.days-a.days||b.total-a.total)
+    .slice(0,10);
   const medals=['🥇','🥈','🥉'];
+  const consistRows=consistency.map((x,i)=>`<tr>
+    <td style="font-size:16px;font-weight:800">${medals[i]||i+1}</td>
+    <td style="font-weight:700">${x.s.prefix}${x.s.name} ${x.s.surname}</td>
+    <td>${x.s.cls}/${x.s.room}</td>
+    <td style="text-align:center;font-weight:800;color:#0f6eb5">${x.days} วัน</td>
+    <td style="font-weight:800;color:#16a34a;text-align:right">${money(x.total)}</td>
+  </tr>`).join('')||`<tr class="empty-row"><td colspan="5">ยังไม่มีข้อมูลการฝาก</td></tr>`;
+
+  // ── Top 10 ยอดออมสูงสุด ──
+  const top10=[...vs].sort((a,b)=>b.balance-a.balance).slice(0,10);
   const topRows=top10.map((s,i)=>`<tr>
     <td style="font-size:16px;font-weight:800">${medals[i]||i+1}</td>
     <td style="font-weight:700">${s.prefix}${s.name} ${s.surname}</td>
     <td>${s.cls}/${s.room}</td>
-    <td style="font-weight:800;color:#16a34a">${money(s.balance)}</td>
-    <td>${money(state.transactions.filter(t=>t.studentId===s.id&&t.type==='deposit').reduce((a,t)=>a+t.amount,0))}</td>
-  </tr>`).join('')||`<tr class="empty-row"><td colspan="5">ยังไม่มีนักเรียน</td></tr>`;
+    <td style="font-weight:800;color:#16a34a;text-align:right">${money(s.balance)}</td>
+  </tr>`).join('')||`<tr class="empty-row"><td colspan="4">ยังไม่มีนักเรียน</td></tr>`;
 
   return `
   <div class="page-header"><div class="page-title">📊 รายงาน</div></div>
@@ -1382,6 +1565,21 @@ function renderReports(){
     <div class="stat-card"><div class="icon">📥</div><div class="val">${money(totalDep)}</div><div class="lbl">รวมฝากตลอดช่วง</div></div>
     <div class="stat-card"><div class="icon">📤</div><div class="val">${money(totalWd)}</div><div class="lbl">รวมถอนตลอดช่วง</div></div>
   </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <div style="font-size:15px;font-weight:700">📈 รายงานการฝากเงิน (${periodLabels[reportPeriod]})</div>
+      <div class="tab-bar" style="margin:0">
+        ${Object.entries(periodLabels).map(([k,v])=>`<button class="tab-btn rep-period${reportPeriod===k?' active':''}" data-p="${k}">${v}</button>`).join('')}
+      </div>
+    </div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:10px">ยอดฝากรวมทั้งหมด <strong style="color:#16a34a">${money(periodTotal)}</strong> • แสดง ${shown.length} ช่วงล่าสุด</div>
+    <div class="table-wrap">
+      <table><thead><tr><th>ช่วงเวลา</th><th style="text-align:center">จำนวนรายการ</th><th style="text-align:right">ยอดฝากรวม</th></tr></thead>
+      <tbody>${periodRows}</tbody></table>
+    </div>
+  </div>
+
   <div class="two-col">
     <div class="card">
       <div style="font-size:15px;font-weight:700;margin-bottom:14px">📊 ยอดออมตามชั้นเรียน</div>
@@ -1397,13 +1595,28 @@ function renderReports(){
         </div>`).join('')||'<p style="color:#94a3b8;font-size:13px">ยังไม่มีข้อมูล</p>'}
     </div>
   </div>
+
+  <div class="card">
+    <div style="font-size:15px;font-weight:700;margin-bottom:6px">⭐ Top 10 นักเรียนออมสม่ำเสมอ</div>
+    <div style="font-size:12px;color:#94a3b8;margin-bottom:14px">จัดอันดับจากจำนวนวันที่มีการฝากเงิน (ยิ่งฝากบ่อยวันยิ่งสม่ำเสมอ)</div>
+    <div class="table-wrap">
+      <table><thead><tr><th>อันดับ</th><th>ชื่อ-นามสกุล</th><th>ชั้น</th><th style="text-align:center">จำนวนวันที่ฝาก</th><th style="text-align:right">รวมฝากทั้งหมด</th></tr></thead>
+      <tbody>${consistRows}</tbody></table>
+    </div>
+  </div>
+
   <div class="card">
     <div style="font-size:15px;font-weight:700;margin-bottom:14px">🏆 Top 10 นักเรียนออมสูงสุด</div>
     <div class="table-wrap">
-      <table><thead><tr><th>อันดับ</th><th>ชื่อ-นามสกุล</th><th>ชั้น</th><th>ยอดออม</th><th>รวมฝากทั้งหมด</th></tr></thead>
+      <table><thead><tr><th>อันดับ</th><th>ชื่อ-นามสกุล</th><th>ชั้น</th><th style="text-align:right">ยอดออม</th></tr></thead>
       <tbody>${topRows}</tbody></table>
     </div>
   </div>`;
+}
+function attachReports(){
+  document.querySelectorAll('.rep-period').forEach(b=>{
+    b.onclick=()=>{reportPeriod=b.dataset.p;document.getElementById('content').innerHTML=renderReports();attachReports();};
+  });
 }
 
 // ══════════════════════════════════════════════════════
