@@ -179,6 +179,8 @@ tr:hover td{background:#f8fafc;}
 <div id="app"></div>
 
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 // ══════════════════════════════════════════════════════
 // STORAGE
@@ -392,6 +394,7 @@ function fmtDate(d){const p=thParts(d);return String(p.d).padStart(2,'0')+'/'+St
 function fmtDateLong(d){const p=thParts(d);return p.d+' '+TH_MONTHS_FULL[p.m-1]+' '+(p.y+543);}                                  // 2 กรกฎาคม 2569
 function fmtTime(d){const p=thParts(d);return p.hh+':'+p.mm+' น.';}                                                              // 17:02 น.
 function todayInput(){const p=thParts(new Date());return p.y+'-'+String(p.m).padStart(2,'0')+'-'+String(p.d).padStart(2,'0');}   // yyyy-mm-dd (สำหรับ input type=date)
+function thisMonthInput(){const p=thParts(new Date());return p.y+'-'+String(p.m).padStart(2,'0');}                                // yyyy-mm (สำหรับ input type=month)
 // แปลงค่าจาก <input type="date"> (yyyy-mm-dd) → {ts, date(พ.ศ.)}
 function fromInputDate(val){
   const [y,mo,da]=String(val).split('-').map(Number);
@@ -1503,6 +1506,175 @@ function attachTxEditModal(t){
 // ══════════════════════════════════════════════════════
 let reportPeriod='day'; // day | week | month
 
+// ── รายงานยอดฝากรายบุคคล ──
+let psMode='month';                 // day | month
+let psDate=todayInput();            // yyyy-mm-dd (โหมดรายวัน)
+let psMonth=thisMonthInput();       // yyyy-mm (โหมดรายเดือน)
+let psCls='';                       // '' = ทุกชั้น
+
+// คีย์วันที่/เดือนของรายการ (ตามเวลาไทย)
+function txKeys(t){
+  const ts=txTs(t); if(!ts)return null;
+  const p=thParts(new Date(ts));
+  return {
+    ymd:p.y+'-'+String(p.m).padStart(2,'0')+'-'+String(p.d).padStart(2,'0'),
+    ym:p.y+'-'+String(p.m).padStart(2,'0'),
+    day:p.d, y:p.y, m:p.m
+  };
+}
+
+// คำนวณข้อมูลรายงานรายบุคคลตามช่วงที่เลือก
+function psData(){
+  const vs=visibleStudents().filter(s=>!psCls||s.cls===psCls)
+    .sort((a,b)=>(a.cls===b.cls?(a.no||0)-(b.no||0):CLASSES.indexOf(a.cls)-CLASSES.indexOf(b.cls)));
+  const deps=state.transactions.filter(t=>t.type==='deposit');
+  if(psMode==='day'){
+    const rows=vs.map(s=>{
+      const amt=deps.filter(t=>t.studentId===s.id&&(txKeys(t)||{}).ymd===psDate).reduce((a,t)=>a+t.amount,0);
+      return {s,amt};
+    });
+    return {rows};
+  }
+  const monthDeps=deps.filter(t=>(txKeys(t)||{}).ym===psMonth);
+  const activeDays=[...new Set(monthDeps.map(t=>txKeys(t).day))].sort((a,b)=>a-b);
+  const rows=vs.map(s=>{
+    const byDay={}; let total=0;
+    monthDeps.filter(t=>t.studentId===s.id).forEach(t=>{const d=txKeys(t).day;byDay[d]=(byDay[d]||0)+t.amount;total+=t.amount;});
+    return {s,byDay,total};
+  });
+  return {rows,activeDays};
+}
+
+function psPeriodLabel(){
+  if(psMode==='day'){return fmtDateLong(new Date(fromInputDate(psDate).ts));}
+  const [y,m]=psMonth.split('-').map(Number);
+  return 'เดือน'+TH_MONTHS_FULL[m-1]+' พ.ศ. '+(y+543);
+}
+
+// สร้างตารางรายงาน (ใช้ inline style เพื่อให้จับภาพ/พิมพ์ออกมาสวยเหมือนกัน)
+function psTableHTML(print){
+  const d=psData();
+  const bd=print?'1px solid #94a3b8':'1px solid #e2e8f0';
+  const th=`padding:7px 8px;border:${bd};background:#1a3a6b;color:#fff;font-weight:700;font-size:${print?'13px':'12px'};white-space:nowrap`;
+  const td=`padding:6px 8px;border:${bd};font-size:${print?'13px':'12px'}`;
+  if(psMode==='day'){
+    let grand=0;
+    const body=d.rows.map((r,i)=>{grand+=r.amt;return `<tr>
+      <td style="${td};text-align:center">${i+1}</td>
+      <td style="${td}">${r.s.prefix}${r.s.name} ${r.s.surname}</td>
+      <td style="${td};text-align:center">${r.s.cls}/${r.s.room}</td>
+      <td style="${td};text-align:right;font-weight:700;color:#16a34a">${r.amt?money(r.amt):'-'}</td>
+      <td style="${td};text-align:right">${money(r.s.balance)}</td>
+    </tr>`;}).join('');
+    return `<table style="border-collapse:collapse;width:100%">
+      <thead><tr><th style="${th};text-align:center">ที่</th><th style="${th}">ชื่อ-นามสกุล</th><th style="${th}">ชั้น</th><th style="${th};text-align:right">ยอดฝากวันนี้</th><th style="${th};text-align:right">ยอดคงเหลือ</th></tr></thead>
+      <tbody>${body||`<tr><td style="${td}" colspan="5">ไม่มีข้อมูล</td></tr>`}</tbody>
+      <tfoot><tr>
+        <td style="${td};text-align:right;font-weight:800" colspan="3">รวมทั้งสิ้น</td>
+        <td style="${td};text-align:right;font-weight:800;color:#16a34a">${money(grand)}</td>
+        <td style="${td}"></td>
+      </tr></tfoot>
+    </table>`;
+  }
+  // เดือน — เมทริกซ์รายวัน + รวมเดือน
+  const days=d.activeDays;
+  const dayCols=days.map(dd=>`<th style="${th};text-align:right">${dd}</th>`).join('');
+  const dayFootTotals={}; let grand=0;
+  const body=d.rows.map((r,i)=>{
+    const cells=days.map(dd=>{const v=r.byDay[dd]||0;dayFootTotals[dd]=(dayFootTotals[dd]||0)+v;return `<td style="${td};text-align:right">${v?money(v):'-'}</td>`;}).join('');
+    grand+=r.total;
+    return `<tr>
+      <td style="${td};text-align:center">${i+1}</td>
+      <td style="${td};white-space:nowrap">${r.s.prefix}${r.s.name} ${r.s.surname}</td>
+      <td style="${td};text-align:center">${r.s.cls}/${r.s.room}</td>
+      ${cells}
+      <td style="${td};text-align:right;font-weight:800;color:#16a34a">${r.total?money(r.total):'-'}</td>
+      <td style="${td};text-align:right">${money(r.s.balance)}</td>
+    </tr>`;
+  }).join('');
+  const footDays=days.map(dd=>`<td style="${td};text-align:right;font-weight:700">${dayFootTotals[dd]?money(dayFootTotals[dd]):'-'}</td>`).join('');
+  return `<table style="border-collapse:collapse;width:100%">
+    <thead><tr>
+      <th style="${th};text-align:center">ที่</th><th style="${th}">ชื่อ-นามสกุล</th><th style="${th}">ชั้น</th>
+      ${dayCols||`<th style="${th}">-</th>`}
+      <th style="${th};text-align:right">รวมเดือน</th><th style="${th};text-align:right">คงเหลือ</th>
+    </tr></thead>
+    <tbody>${body||`<tr><td style="${td}" colspan="${days.length+5}">ไม่มีข้อมูล</td></tr>`}</tbody>
+    <tfoot><tr>
+      <td style="${td};text-align:right;font-weight:800" colspan="3">รวมแต่ละวัน</td>
+      ${footDays||`<td style="${td}"></td>`}
+      <td style="${td};text-align:right;font-weight:800;color:#16a34a">${money(grand)}</td>
+      <td style="${td}"></td>
+    </tr></tfoot>
+  </table>`;
+}
+
+// เอกสารรายงานฉบับพิมพ์ (หัวโรงเรียน + ตาราง + ช่องลงนาม)
+function buildReportDoc(){
+  const now=new Date();
+  const clsText=psCls?('ชั้น '+psCls):'ทุกชั้นเรียน';
+  return `
+  <div style="text-align:center;margin-bottom:6px">
+    <div style="font-size:22px;font-weight:800;color:#1a3a6b">โรงเรียนบ้านนิคมสายโท 12 เหนือ</div>
+    <div style="font-size:17px;font-weight:700;margin-top:6px">รายงานการออมทรัพย์นักเรียน (${psMode==='day'?'รายวัน':'รายเดือน'})</div>
+    <div style="font-size:14px;margin-top:2px">ประจำ${psPeriodLabel()} • ${clsText}</div>
+  </div>
+  <div style="font-size:12px;color:#475569;margin:10px 0 12px">พิมพ์รายงานเมื่อ ${fmtDateLong(now)} เวลา ${fmtTime(now)}</div>
+  ${psTableHTML(true)}
+  <div style="display:flex;justify-content:space-around;margin-top:40px;font-size:13px;text-align:center">
+    <div>ลงชื่อ ....................................................<br><div style="margin-top:6px">( ${state.session?.name||'.......................'} )</div><div style="margin-top:2px">ผู้จัดทำ / เจ้าหน้าที่การเงิน</div></div>
+    <div>ลงชื่อ ....................................................<br><div style="margin-top:6px">( ....................................................... )</div><div style="margin-top:2px">ผู้อำนวยการโรงเรียน</div></div>
+  </div>`;
+}
+
+function reportFileName(){
+  const base='รายงานการออม_'+(psMode==='day'?psDate:psMonth)+(psCls?'_'+psCls:'');
+  return base.replace(/[\\/:*?"<>|]/g,'-');
+}
+
+async function exportReport(kind){
+  if(typeof html2canvas==='undefined'||!window.jspdf){showToast('กำลังโหลดตัวส่งออก ลองอีกครั้งในอีกครู่',false);return;}
+  showToast('กำลังสร้างรายงาน...');
+  const wide = psMode==='month';
+  const d=psData();
+  const docW = wide ? Math.max(1000, 380 + (d.activeDays?.length||0)*64 + 200) : 900;
+  const holder=document.createElement('div');
+  holder.style.cssText='position:fixed;left:-99999px;top:0;z-index:-1;';
+  holder.innerHTML=`<div id="rep-doc" style="width:${docW}px;background:#fff;padding:34px 30px;font-family:Sarabun,sans-serif;color:#111">${buildReportDoc()}</div>`;
+  document.body.appendChild(holder);
+  try{
+    await new Promise(r=>setTimeout(r,150)); // รอฟอนต์เรนเดอร์
+    const canvas=await html2canvas(holder.querySelector('#rep-doc'),{scale:2,backgroundColor:'#ffffff'});
+    if(kind==='png'){
+      const a=document.createElement('a');
+      a.href=canvas.toDataURL('image/png');
+      a.download=reportFileName()+'.png';
+      document.body.appendChild(a);a.click();a.remove();
+    }else{
+      const {jsPDF}=window.jspdf;
+      const pdf=new jsPDF({orientation:wide?'l':'p',unit:'mm',format:'a4'});
+      const margin=8;
+      const pw=pdf.internal.pageSize.getWidth(), ph=pdf.internal.pageSize.getHeight();
+      const iw=pw-margin*2;
+      const pxPerMm=canvas.width/iw;
+      const pageHpx=(ph-margin*2)*pxPerMm;
+      let sy=0, first=true;
+      while(sy<canvas.height){
+        const sliceH=Math.min(pageHpx,canvas.height-sy);
+        const c2=document.createElement('canvas');c2.width=canvas.width;c2.height=sliceH;
+        c2.getContext('2d').drawImage(canvas,0,sy,canvas.width,sliceH,0,0,canvas.width,sliceH);
+        if(!first)pdf.addPage();
+        pdf.addImage(c2.toDataURL('image/png'),'PNG',margin,margin,iw,sliceH/pxPerMm);
+        first=false; sy+=sliceH;
+      }
+      pdf.save(reportFileName()+'.pdf');
+    }
+    showToast('ส่งออกรายงานสำเร็จ');
+  }catch(e){console.error(e);showToast('ส่งออกไม่สำเร็จ ลองใหม่อีกครั้ง',false);}
+  finally{holder.remove();}
+}
+
+
 // จัดกลุ่มรายการฝากตามช่วงเวลา → [{key,label,count,total,ts}] เรียงล่าสุดก่อน
 function groupDeposits(period){
   const deps=state.transactions.filter(t=>t.type==='deposit');
@@ -1615,6 +1787,31 @@ function renderReports(){
     </div>
   </div>
 
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px">
+      <div style="font-size:15px;font-weight:700">🧾 ยอดฝากรายบุคคล (สำหรับส่งผู้บริหาร)</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline btn-sm" id="ps-png">📷 บันทึกรูปภาพ</button>
+        <button class="btn btn-primary btn-sm" id="ps-pdf">📄 ดาวน์โหลด PDF</button>
+      </div>
+    </div>
+    <div class="search-bar" style="margin-bottom:12px">
+      <div class="tab-bar" style="margin:0">
+        <button class="tab-btn ps-mode${psMode==='day'?' active':''}" data-m="day">รายวัน</button>
+        <button class="tab-btn ps-mode${psMode==='month'?' active':''}" data-m="month">รายเดือน</button>
+      </div>
+      ${psMode==='day'
+        ? `<input type="date" class="form-select" id="ps-date" value="${psDate}" style="width:auto">`
+        : `<input type="month" class="form-select" id="ps-month" value="${psMonth}" style="width:auto">`}
+      <select class="form-select" id="ps-cls" style="width:auto">
+        <option value="">ทุกชั้น</option>
+        ${CLASSES.map(c=>`<option value="${c}"${psCls===c?' selected':''}>${c}</option>`).join('')}
+      </select>
+    </div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:10px">แสดงยอดฝากของนักเรียนแต่ละคน ประจำ${psPeriodLabel()}${psMode==='month'?' (แยกตามวันที่มีการฝาก)':''}</div>
+    <div class="table-wrap">${psTableHTML(false)}</div>
+  </div>
+
   <div class="two-col">
     <div class="card">
       <div style="font-size:15px;font-weight:700;margin-bottom:14px">📊 ยอดออมตามชั้นเรียน</div>
@@ -1652,6 +1849,15 @@ function attachReports(){
   document.querySelectorAll('.rep-period').forEach(b=>{
     b.onclick=()=>{reportPeriod=b.dataset.p;document.getElementById('content').innerHTML=renderReports();attachReports();};
   });
+  const rerender=()=>{document.getElementById('content').innerHTML=renderReports();attachReports();};
+  document.querySelectorAll('.ps-mode').forEach(b=>{
+    b.onclick=()=>{psMode=b.dataset.m;rerender();};
+  });
+  document.getElementById('ps-date')?.addEventListener('change',e=>{psDate=e.target.value;rerender();});
+  document.getElementById('ps-month')?.addEventListener('change',e=>{psMonth=e.target.value;rerender();});
+  document.getElementById('ps-cls')?.addEventListener('change',e=>{psCls=e.target.value;rerender();});
+  document.getElementById('ps-png')?.addEventListener('click',()=>exportReport('png'));
+  document.getElementById('ps-pdf')?.addEventListener('click',()=>exportReport('pdf'));
 }
 
 // ══════════════════════════════════════════════════════
