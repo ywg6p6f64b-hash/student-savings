@@ -296,6 +296,25 @@ function cloudSave(){
   syncTimer=setTimeout(cloudPush,800); // รวมหลายรายการติดกันเป็นการบันทึกครั้งเดียว
 }
 
+// รวมข้อมูล 2 ชุดตาม id: ยึดของชีตเป็นหลัก แต่คงรายการที่มีเฉพาะในเครื่องไว้ (ไม่ลบทิ้ง)
+function mergeById(remote,local){
+  const map=new Map();
+  (Array.isArray(remote)?remote:[]).forEach(o=>{if(o&&o.id!=null)map.set(String(o.id),o);});
+  (Array.isArray(local)?local:[]).forEach(o=>{if(o&&o.id!=null&&!map.has(String(o.id)))map.set(String(o.id),o);});
+  return [...map.values()];
+}
+// คำนวณยอดคงเหลือของนักเรียนจากรายการฝาก/ถอนจริง (เฉพาะคนที่มีรายการ — ไม่มีรายการคงยอดเดิมไว้ ป้องกันยอดเป็น 0)
+function recomputeBalances(){
+  const sum={},cnt={};
+  (state.transactions||[]).forEach(t=>{
+    if(!t||!t.studentId)return;
+    const d=t.type==='withdraw'?-Number(t.amount||0):Number(t.amount||0);
+    sum[t.studentId]=(sum[t.studentId]||0)+d;
+    cnt[t.studentId]=(cnt[t.studentId]||0)+1;
+  });
+  state.students=(state.students||[]).map(s=>cnt[s.id]?{...s,balance:sum[s.id]}:s);
+}
+
 async function cloudLoad(){
   if(!API_URL) return false;
   setSyncStatus('loading');
@@ -304,15 +323,22 @@ async function cloudLoad(){
     if(!data || !Array.isArray(data.users)) throw new Error('รูปแบบข้อมูลไม่ถูกต้อง');
     const hasData=(data.users.length>0)||(Array.isArray(data.students)&&data.students.length>0);
     if(hasData){
-      // ชีตมีข้อมูลจริง → ยึดชีตเป็นหลัก แล้วเก็บสำเนาในเครื่อง
-      state.users=data.users;
-      state.students=data.students||[];
-      state.transactions=data.transactions||[];
-      state.withdrawReqs=data.withdrawReqs||[];
-      state.audit=data.audit||[];
+      const rTx=(data.transactions||[]).length, rStu=(data.students||[]).length,
+            rWd=(data.withdrawReqs||[]).length, rUsr=(data.users||[]).length, rAud=(data.audit||[]).length;
+      // ★ รวมแบบ merge: ไม่ทับข้อมูลในเครื่องด้วยของว่างจากชีต (กันข้อมูลหาย)
+      state.users=mergeById(data.users,state.users);
+      state.students=mergeById(data.students||[],state.students);
+      state.transactions=mergeById(data.transactions||[],state.transactions);
+      state.withdrawReqs=mergeById(data.withdrawReqs||[],state.withdrawReqs);
+      state.audit=mergeById(data.audit||[],state.audit);
+      recomputeBalances(); // ปรับยอดคงเหลือให้ตรงกับรายการฝาก/ถอนหลังรวมข้อมูล
       persistLocal();
       cloudReady=true;
       setSyncStatus('ok','☁️ เชื่อมต่อ Google Sheets แล้ว');
+      // ถ้าในเครื่องมีรายการที่ชีตยังไม่มี → ดันขึ้นไปเติมให้ครบ
+      const needPush = state.transactions.length>rTx || state.students.length>rStu ||
+                       state.withdrawReqs.length>rWd || state.users.length>rUsr || state.audit.length>rAud;
+      if(needPush) cloudSave();
       return true;
     }
     // ชีตว่างจริง (ตั้งค่าครั้งแรกเท่านั้น) → อัปโหลดข้อมูลปัจจุบันขึ้นไปเป็นชุดตั้งต้น
