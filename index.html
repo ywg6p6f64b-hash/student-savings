@@ -390,28 +390,68 @@ function thParts(d){
   const p={};f.formatToParts(d).forEach(x=>{if(x.type!=='literal')p[x.type]=x.value;});
   return {y:+p.year,m:+p.month,d:+p.day,hh:p.hour==='24'?'00':p.hour,mm:p.minute};
 }
-function fmtDate(d){const p=thParts(d);return String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0')+'/'+(p.y+543);}       // 02/07/2569
-function fmtDateLong(d){const p=thParts(d);return p.d+' '+TH_MONTHS_FULL[p.m-1]+' '+(p.y+543);}                                  // 2 กรกฎาคม 2569
+function fmtDate(d){const p=thParts(d);return String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0')+'/'+p.y;}       // 02/07/2026
+function fmtDateLong(d){const p=thParts(d);return p.d+' '+TH_MONTHS_FULL[p.m-1]+' '+p.y;}                              // 2 กรกฎาคม 2026
 function fmtTime(d){const p=thParts(d);return p.hh+':'+p.mm+' น.';}                                                              // 17:02 น.
 function todayInput(){const p=thParts(new Date());return p.y+'-'+String(p.m).padStart(2,'0')+'-'+String(p.d).padStart(2,'0');}   // yyyy-mm-dd (สำหรับ input type=date)
 function thisMonthInput(){const p=thParts(new Date());return p.y+'-'+String(p.m).padStart(2,'0');}                                // yyyy-mm (สำหรับ input type=month)
-// แปลงค่าจาก <input type="date"> (yyyy-mm-dd) → {ts, date(พ.ศ.)}
+// แปลงค่าจาก <input type="date"> (yyyy-mm-dd) → {ts, date(ค.ศ.)}
 function fromInputDate(val){
   const [y,mo,da]=String(val).split('-').map(Number);
   if(!y||!mo||!da){const n=new Date();return {ts:n.getTime(),date:fmtDate(n)};}
   const d=new Date(y,mo-1,da,12,0,0);
-  return {ts:d.getTime(), date:String(da).padStart(2,'0')+'/'+String(mo).padStart(2,'0')+'/'+(y+543)};
+  return {ts:d.getTime(), date:String(da).padStart(2,'0')+'/'+String(mo).padStart(2,'0')+'/'+y};
 }
-// หา timestamp ของรายการ (รองรับข้อมูลเก่าที่ไม่มี ts โดยแปลงจากวันที่ พ.ศ.)
-function txTs(t){
-  if(t.ts)return t.ts;
-  const m=String(t.date||'').split('/');
-  if(m.length===3){const d=+m[0],mo=+m[1],y=(+m[2])-543;const dt=new Date(y,mo-1,d,12,0,0);if(!isNaN(dt.getTime()))return dt.getTime();}
+// แปลงค่าวันที่หลายรูปแบบ → epoch ms (รองรับ พ.ศ./ค.ศ. และรูปแบบที่ Sheets แปลงเอง)
+function parseAnyDate(val){
+  if(val==null||val==='')return 0;
+  if(typeof val==='number'){
+    if(val>1e11)return val;                         // epoch ms
+    if(val>20000&&val<200000)return Math.round((val-25569)*86400000); // serial ของ Google Sheets
+    return 0;
+  }
+  const s=String(val).trim();
+  let m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{3,4})/);          // dd/mm/yyyy
+  if(m){let d=+m[1],mo=+m[2],y=+m[3];if(y>=2500)y-=543;const dt=new Date(y,mo-1,d,12,0,0);if(!isNaN(dt.getTime()))return dt.getTime();}
+  m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);                   // yyyy-mm-dd
+  if(m){let y=+m[1],mo=+m[2],d=+m[3];if(y>=2500)y-=543;const dt=new Date(y,mo-1,d,12,0,0);if(!isNaN(dt.getTime()))return dt.getTime();}
+  const dd=new Date(s);                                        // เช่น "Wed Jul 02 2569 ..." ที่ Sheets แปลงไว้
+  if(!isNaN(dd.getTime())){let y=dd.getFullYear(),mo=dd.getMonth(),d=dd.getDate();if(y>=2500)y-=543;return new Date(y,mo,d,12,0,0).getTime();}
   return 0;
+}
+// หา timestamp ของรายการ (ใช้ ts ก่อน ไม่มีค่อยแปลงจากวันที่)
+function txTs(t){
+  const ts=Number(t.ts);
+  if(ts&&ts>1e11)return ts;
+  return parseAnyDate(t.date);
 }
 function nowStr(){
   const d=new Date();
   return {date:fmtDate(d),time:fmtTime(d),ts:d.getTime()};
+}
+
+// แปลงวันที่ที่เก็บเป็น พ.ศ. (ปี ≥ 2500) → ค.ศ. — ปลอดภัยถ้ารันซ้ำ (ค.ศ. จะไม่ถูกแปลงอีก)
+function beToCe(dateStr){
+  const m=String(dateStr||'').split('/');
+  if(m.length!==3)return dateStr;
+  let y=+m[2];
+  if(isNaN(y))return dateStr;
+  if(y>=2500)y-=543;
+  return String(+m[0]).padStart(2,'0')+'/'+String(+m[1]).padStart(2,'0')+'/'+y;
+}
+// ปรับข้อมูลให้เป็นมาตรฐาน: วันที่เป็น ค.ศ. + เติม ts ให้ทุกรายการ (แก้ปัญหารายงานไม่ขึ้นข้ามเครื่อง)
+function migrateDatesToCE(){
+  let changed=false;
+  const fixTx=(arr)=>{(arr||[]).forEach(o=>{
+    const ts=txTs(o);                                   // คำนวณจาก ts เดิมหรือจากวันที่
+    if(ts && Number(o.ts)!==ts){o.ts=ts;changed=true;}  // เติม/แก้ ts
+    if(ts){const nd=fmtDate(new Date(ts));if(o.date!==nd){o.date=nd;changed=true;}} // วันที่เป็น ค.ศ. รูปแบบมาตรฐาน
+  });};
+  fixTx(state.transactions);
+  fixTx(state.withdrawReqs);
+  (state.audit||[]).forEach(o=>{if(o.date){const n=beToCe(o.date);if(n!==o.date){o.date=n;changed=true;}}});
+  (state.students||[]).forEach(o=>{if(o.openDate){const n=beToCe(o.openDate);if(n!==o.openDate){o.openDate=n;changed=true;}}});
+  return changed;
 }
 function genId(){return Math.random().toString(36).slice(2,10).toUpperCase();}
 function money(n){return '฿'+(n||0).toLocaleString('th-TH');}
@@ -499,7 +539,7 @@ function renderLogin(){
       <div class="login-logo">
         <span class="emoji">🏦</span>
         <h1>ระบบออมเงินนักเรียน</h1>
-        <p>โรงเรียนบ้านนิคมสายโท 12 เหนือ • ปีการศึกษา 2569</p>
+        <p>โรงเรียนบ้านนิคมสายโท 12 เหนือ • ปีการศึกษา 2026</p>
       </div>
       <div class="form-group">
         <label class="form-label">ชื่อผู้ใช้งาน</label>
@@ -1452,10 +1492,10 @@ function attachHistory(){
 
 function renderTxEditModal(t){
   const s=state.students.find(x=>x.id===t.studentId);
-  // แปลงวันที่ พ.ศ. → yyyy-mm-dd สำหรับ input
+  // แปลงวันที่ (รองรับทั้ง ค.ศ./พ.ศ.) → yyyy-mm-dd สำหรับ input
   let dv=todayInput();
   const m=String(t.date||'').split('/');
-  if(m.length===3){const y=(+m[2])-543;dv=y+'-'+String(+m[1]).padStart(2,'0')+'-'+String(+m[0]).padStart(2,'0');}
+  if(m.length===3){let y=+m[2];if(y>=2500)y-=543;dv=y+'-'+String(+m[1]).padStart(2,'0')+'-'+String(+m[0]).padStart(2,'0');}
   return `<div class="modal-head"><h3>✏️ แก้ไขรายการ${t.type==='deposit'?'ฝาก':'ถอน'}</h3><button class="modal-close" id="modal-close-btn">✕</button></div>
   <div class="modal-body">
     <div class="info-box blue" style="border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px">
@@ -1549,7 +1589,7 @@ function psData(){
 function psPeriodLabel(){
   if(psMode==='day'){return fmtDateLong(new Date(fromInputDate(psDate).ts));}
   const [y,m]=psMonth.split('-').map(Number);
-  return 'เดือน'+TH_MONTHS_FULL[m-1]+' พ.ศ. '+(y+543);
+  return 'เดือน'+TH_MONTHS_FULL[m-1]+' '+y;
 }
 
 // สร้างตารางรายงาน (ใช้ inline style เพื่อให้จับภาพ/พิมพ์ออกมาสวยเหมือนกัน)
@@ -1688,11 +1728,11 @@ function groupDeposits(period){
     let key,label,sortTs;
     if(period==='day'){
       key=`${p.y}-${p.m}-${p.d}`;
-      label=`${p.d} ${TH_MONTHS_SHORT[p.m-1]} ${p.y+543}`;
+      label=`${p.d} ${TH_MONTHS_SHORT[p.m-1]} ${p.y}`;
       sortTs=new Date(p.y,p.m-1,p.d).getTime();
     }else if(period==='month'){
       key=`${p.y}-${p.m}`;
-      label=`${TH_MONTHS_FULL[p.m-1]} ${p.y+543}`;
+      label=`${TH_MONTHS_FULL[p.m-1]} ${p.y}`;
       sortTs=new Date(p.y,p.m-1,1).getTime();
     }else{ // week (จันทร์–อาทิตย์)
       const base=new Date(p.y,p.m-1,p.d);
@@ -1701,7 +1741,7 @@ function groupDeposits(period){
       const sun=new Date(mon); sun.setDate(mon.getDate()+6);
       key=`${mon.getFullYear()}-${mon.getMonth()}-${mon.getDate()}`;
       const mp=thParts(mon), sp=thParts(sun);
-      label=`${mp.d} ${TH_MONTHS_SHORT[mp.m-1]} – ${sp.d} ${TH_MONTHS_SHORT[sp.m-1]} ${sp.y+543}`;
+      label=`${mp.d} ${TH_MONTHS_SHORT[mp.m-1]} – ${sp.d} ${TH_MONTHS_SHORT[sp.m-1]} ${sp.y}`;
       sortTs=mon.getTime();
     }
     if(!groups[key])groups[key]={key,label,count:0,total:0,sortTs};
@@ -1982,9 +2022,12 @@ function renderAudit(){
 // INIT
 // ══════════════════════════════════════════════════════
 (async function init(){
-  render(); // แสดงหน้าจอทันทีจากข้อมูลในเครื่องก่อน
-  const loaded=await cloudLoad(); // แล้วค่อยดึงข้อมูลล่าสุดจาก Google Sheets
-  if(loaded) render(); // อัปเดตหน้าจอด้วยข้อมูลจากชีต
+  migrateDatesToCE();       // แปลงข้อมูลในเครื่อง (ถ้าเป็น พ.ศ.) → ค.ศ. ก่อนแสดงผล
+  render();
+  const loaded=await cloudLoad(); // ดึงข้อมูลล่าสุดจาก Google Sheets
+  const changed=migrateDatesToCE(); // แปลงข้อมูลที่ดึงจากชีต (ถ้ายังเป็น พ.ศ.)
+  if(changed && cloudReady) save(); // เขียนข้อมูลที่แปลงแล้วกลับขึ้นชีตให้ถาวร
+  render();
   if(!API_URL) setSyncStatus('off');
 })();
 </script>
