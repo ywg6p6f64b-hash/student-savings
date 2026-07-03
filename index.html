@@ -638,15 +638,16 @@ function renderDashboard(){
   const days=[];
   const maxBar=Math.max(1,...Array.from({length:7},(_,i)=>{
     const d=new Date();d.setDate(d.getDate()-(6-i));
-    const ds=d.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit',year:'numeric'});
+    const ds=fmtDate(d);
     return state.transactions.filter(t=>t.date===ds&&t.type==='deposit').reduce((a,t)=>a+t.amount,0);
   }));
   const barHtml=Array.from({length:7},(_,i)=>{
     const d=new Date();d.setDate(d.getDate()-(6-i));
-    const ds=d.toLocaleDateString('th-TH',{day:'2-digit',month:'2-digit',year:'numeric'});
+    const ds=fmtDate(d);
+    const p=thParts(d);
     const amt=state.transactions.filter(t=>t.date===ds&&t.type==='deposit').reduce((a,t)=>a+t.amount,0);
     const h=Math.max(2,Math.round((amt/maxBar)*80));
-    const lbl=`${d.getDate()}/${d.getMonth()+1}`;
+    const lbl=`${p.d}/${p.m}`;
     return `<div class="bar-col"><div class="bar-fill" style="height:${h}px" title="${money(amt)}"></div><div class="bar-lbl">${lbl}</div></div>`;
   }).join('');
 
