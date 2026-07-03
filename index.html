@@ -195,25 +195,39 @@ const LS = {
 const API_URL = 'https://script.google.com/macros/s/AKfycbyaeLEr0RieI06Bk3Ni5OGPgE2B0_vpN2qqFuLPq3lJW7tbVQlbmnBc_p0c_eYT53QW/exec';
 
 let syncTimer=null, syncBusy=false, syncQueued=false;
+let cloudReady=false; // จะเป็น true ก็ต่อเมื่อยืนยันสถานะชีตแล้ว — กันการเขียนทับข้อมูลจริงด้วยข้อมูลตัวอย่าง
 
 function setSyncStatus(status,text){
   let el=document.getElementById('sync-badge');
   if(!el){
     el=document.createElement('div');
     el.id='sync-badge';
-    el.style.cssText='position:fixed;bottom:14px;right:14px;z-index:9998;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.15);font-family:Sarabun,sans-serif;transition:.2s;';
+    el.style.cssText='position:fixed;bottom:14px;right:14px;z-index:9998;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.15);font-family:Sarabun,sans-serif;transition:.2s;max-width:min(92vw,360px);cursor:pointer;';
+    el.title='แตะเพื่อบันทึก/เชื่อมต่อใหม่';
+    el.onclick=async()=>{
+      if(!cloudReady){ await cloudLoad(); }
+      else { await cloudPush(); }
+    };
     document.body.appendChild(el);
   }
   const styles={
     off:    ['#f1f5f9','#64748b','💾 บันทึกในเครื่องเท่านั้น'],
     syncing:['#fef3c7','#d97706','🔄 กำลังบันทึกลง Google Sheets...'],
     ok:     ['#dcfce7','#16a34a','☁️ บันทึกลง Google Sheets แล้ว'],
-    error:  ['#fee2e2','#dc2626','⚠️ ซิงก์ไม่สำเร็จ (ข้อมูลยังอยู่ในเครื่อง)'],
+    error:  ['#fee2e2','#dc2626','⚠️ ซิงก์ไม่สำเร็จ — ข้อมูลยังอยู่ในเครื่อง'],
     loading:['#eff6ff','#0f6eb5','⏳ กำลังโหลดข้อมูลจาก Google Sheets...'],
   };
   const [bg,color,defText]=styles[status]||styles.off;
   el.style.background=bg; el.style.color=color;
   el.textContent=text||defText;
+}
+
+function persistLocal(){
+  LS.set('sav_users',state.users);
+  LS.set('sav_students',state.students);
+  LS.set('sav_transactions',state.transactions);
+  LS.set('sav_withdraw_requests',state.withdrawReqs);
+  LS.set('sav_audit',state.audit);
 }
 
 function cloudPayload(){
@@ -226,26 +240,51 @@ function cloudPayload(){
   };
 }
 
+// GET — พิสูจน์แล้วว่าอ่านข้ามโดเมนได้เสมอ ใช้ทั้งโหลดและ "ยืนยันผลการเขียน"
+async function cloudFetchAll(){
+  const res=await fetch(API_URL+'?t='+Date.now(),{cache:'no-store'});
+  return await res.json();
+}
+
 async function cloudPush(){
   if(!API_URL) return;
+  if(!cloudReady){ // ยังไม่ยืนยันสถานะชีต → ไม่เขียน เพื่อไม่ให้ข้อมูลจริงถูกทับ
+    setSyncStatus('error','⚠️ ยังเชื่อม Sheets ไม่ได้ — กดรีเฟรชหน้าเพื่อเชื่อมต่อก่อนบันทึก');
+    return;
+  }
   if(syncBusy){syncQueued=true;return;}
   syncBusy=true;
   setSyncStatus('syncing');
+  const payload=cloudPayload();
   try{
     await fetch(API_URL,{
       method:'POST',
-      mode:'no-cors', // เลี่ยงการบล็อก CORS ตอนเขียนข้อมูล (Apps Script รับได้)
+      mode:'no-cors',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify(cloudPayload()),
+      body:JSON.stringify(payload),
     });
-    // โหมด no-cors อ่านผลลัพธ์กลับมาไม่ได้ แต่ข้อมูลถูกบันทึกลงชีตแล้ว
-    setSyncStatus('ok');
+    // ★ ยืนยันจริงว่าข้อมูลขึ้นชีตแล้ว โดยอ่านกลับมาเทียบจำนวน (GET เชื่อถือได้)
+    let ok=false;
+    for(const wait of [600,1200,2000]){
+      await new Promise(r=>setTimeout(r,wait));
+      try{
+        const chk=await cloudFetchAll();
+        if(chk && Array.isArray(chk.students) && Array.isArray(chk.users) &&
+           chk.students.length===payload.students.length &&
+           chk.users.length===payload.users.length &&
+           Array.isArray(chk.transactions) && chk.transactions.length===payload.transactions.length){
+          ok=true;break;
+        }
+      }catch(e){}
+    }
+    if(ok) setSyncStatus('ok');
+    else setSyncStatus('error','⚠️ ข้อมูลอาจไม่ได้บันทึกลง Sheets! แตะป้ายนี้เพื่อลองใหม่ หรือตรวจการตั้งค่า Apps Script');
   }catch(err){
     console.error('Sync error:',err);
     setSyncStatus('error');
   }finally{
     syncBusy=false;
-    if(syncQueued){syncQueued=false;cloudPush();}
+    if(syncQueued){syncQueued=false;setTimeout(cloudPush,200);}
   }
 }
 
@@ -259,29 +298,29 @@ async function cloudLoad(){
   if(!API_URL) return false;
   setSyncStatus('loading');
   try{
-    const res=await fetch(API_URL+'?t='+Date.now());
-    const data=await res.json();
-    if(data && Array.isArray(data.users) && data.users.length>0){
+    const data=await cloudFetchAll();
+    if(!data || !Array.isArray(data.users)) throw new Error('รูปแบบข้อมูลไม่ถูกต้อง');
+    const hasData=(data.users.length>0)||(Array.isArray(data.students)&&data.students.length>0);
+    if(hasData){
+      // ชีตมีข้อมูลจริง → ยึดชีตเป็นหลัก แล้วเก็บสำเนาในเครื่อง
       state.users=data.users;
       state.students=data.students||[];
       state.transactions=data.transactions||[];
       state.withdrawReqs=data.withdrawReqs||[];
       state.audit=data.audit||[];
-      // เก็บสำเนาไว้ในเครื่องด้วย (เผื่อออฟไลน์)
-      LS.set('sav_users',state.users);
-      LS.set('sav_students',state.students);
-      LS.set('sav_transactions',state.transactions);
-      LS.set('sav_withdraw_requests',state.withdrawReqs);
-      LS.set('sav_audit',state.audit);
+      persistLocal();
+      cloudReady=true;
       setSyncStatus('ok','☁️ เชื่อมต่อ Google Sheets แล้ว');
       return true;
     }
-    // ชีตยังว่าง → ส่งข้อมูลตั้งต้นในเครื่องขึ้นไปครั้งแรก
+    // ชีตว่างจริง (ตั้งค่าครั้งแรกเท่านั้น) → อัปโหลดข้อมูลปัจจุบันขึ้นไปเป็นชุดตั้งต้น
+    cloudReady=true;
     await cloudPush();
     return true;
   }catch(err){
     console.error('Load error:',err);
-    setSyncStatus('error','⚠️ โหลดจาก Google Sheets ไม่ได้ ใช้ข้อมูลในเครื่องแทน');
+    cloudReady=false; // ★ โหลดไม่ได้ → ล็อกไม่ให้เขียนทับชีต จนกว่าจะเชื่อมต่อสำเร็จ
+    setSyncStatus('error','⚠️ เชื่อม Google Sheets ไม่ได้ — จะยังไม่บันทึกขึ้นคลาวด์ กดรีเฟรชเพื่อลองใหม่');
     return false;
   }
 }
@@ -328,11 +367,7 @@ const state = {
 };
 
 function save(){
-  LS.set('sav_users',state.users);
-  LS.set('sav_students',state.students);
-  LS.set('sav_transactions',state.transactions);
-  LS.set('sav_withdraw_requests',state.withdrawReqs);
-  LS.set('sav_audit',state.audit);
+  persistLocal();
   LS.set('sav_session',state.session);
   cloudSave(); // ส่งขึ้น Google Sheets อัตโนมัติ
 }
