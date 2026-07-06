@@ -232,11 +232,16 @@ function persistLocal(){
   LS.set('sav_audit',state.audit);
 }
 
+// รายการที่ถูกลบ (tombstone) — เก็บในเครื่อง กันไม่ให้ถูกดึงกลับมาตอน merge
+let txTombstones = LS.get('sav_tx_tombstones', []);
+function addTombstone(id){ if(id && !txTombstones.includes(id)){ txTombstones.push(id); LS.set('sav_tx_tombstones', txTombstones); } }
+function dropTombstoned(arr){ const s=new Set(txTombstones); return (arr||[]).filter(t=>t&&!s.has(t.id)); }
+
 function cloudPayload(){
   return {
     users: state.users,
     students: state.students,
-    transactions: state.transactions,
+    transactions: dropTombstoned(state.transactions),
     withdrawReqs: state.withdrawReqs,
     audit: state.audit,
   };
@@ -257,24 +262,38 @@ async function cloudPush(){
   if(syncBusy){syncQueued=true;return;}
   syncBusy=true;
   setSyncStatus('syncing');
-  const payload=cloudPayload();
   try{
+    // ★ อ่านข้อมูลล่าสุดจากชีตมารวมก่อนเขียน (กันการเขียนทับข้อมูลของเครื่องอื่นที่บันทึกพร้อมกัน)
+    try{
+      const remote=await cloudFetchAll();
+      if(remote && Array.isArray(remote.users)){
+        state.users        = mergeById(state.users,        remote.users);          // ยึดของในเครื่องก่อน + เติมของเครื่องอื่น
+        state.students     = mergeById(state.students,     remote.students||[]);
+        state.transactions = dropTombstoned(mergeById(state.transactions, remote.transactions||[]));
+        state.withdrawReqs = mergeById(state.withdrawReqs, remote.withdrawReqs||[]);
+        state.audit        = mergeById(state.audit,        remote.audit||[]);
+        recomputeBalances();
+        purgeDemoStudents();
+        persistLocal();
+      }
+    }catch(e){ /* อ่านชีตไม่ได้ → เขียนด้วยข้อมูลในเครื่องล้วน */ }
+
+    const payload=cloudPayload();
     await fetch(API_URL,{
       method:'POST',
       mode:'no-cors',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify(payload),
     });
-    // ★ ยืนยันจริงว่าข้อมูลขึ้นชีตแล้ว โดยอ่านกลับมาเทียบจำนวน (GET เชื่อถือได้)
+    // ★ ยืนยันว่าชีตมีข้อมูล "อย่างน้อย" เท่าที่เราส่ง (เครื่องอื่นอาจเพิ่มเข้ามาระหว่างนั้น)
     let ok=false;
-    for(const wait of [600,1200,2000]){
+    for(const wait of [700,1400,2200]){
       await new Promise(r=>setTimeout(r,wait));
       try{
         const chk=await cloudFetchAll();
-        if(chk && Array.isArray(chk.students) && Array.isArray(chk.users) &&
-           chk.students.length===payload.students.length &&
-           chk.users.length===payload.users.length &&
-           Array.isArray(chk.transactions) && chk.transactions.length===payload.transactions.length){
+        if(chk && Array.isArray(chk.students) && Array.isArray(chk.transactions) &&
+           chk.transactions.length>=payload.transactions.length &&
+           chk.students.length>=payload.students.length){
           ok=true;break;
         }
       }catch(e){}
@@ -1511,6 +1530,7 @@ function attachHistory(){
         state.students=state.students.map(x=>x.id===s.id?{...x,balance:x.balance+delta}:x);
       }
       state.transactions=state.transactions.filter(x=>x.id!==t.id);
+      addTombstone(t.id); // กันไม่ให้ merge ดึงรายการที่ลบกลับมา
       addAudit('DELETE_TX',`ลบรายการ${t.type==='deposit'?'ฝาก':'ถอน'} ${money(t.amount)}${s?' ของ '+s.name+' '+s.surname:''}`);
       save();showToast('ลบรายการแล้ว');
       document.getElementById('content').innerHTML=renderHistory();attachHistory();
