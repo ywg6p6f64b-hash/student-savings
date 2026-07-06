@@ -365,19 +365,21 @@ function seedData(){
     {id:'teacher02',name:'ครูสมหญิง ใฝ่เรียน',password:'teacher02',role:'teacher',classRoom:'ป.5',room:'1'},
     {id:'parent01',name:'ผู้ปกครอง ด.ช.ธนากร',password:'parent01',role:'parent',studentId:'STD001'},
   ]);
-  LS.set('sav_students',[
-    {id:'STD001',no:1,prefix:'ด.ช.',name:'ธนากร',surname:'สุขใส',cls:'ป.4',room:'1',balance:0,dob:'2558-03-15',parentPhone:'081-111-1111',accountNo:'SAV-001',openDate:'01/05/2568',status:'active'},
-    {id:'STD002',no:2,prefix:'ด.ญ.',name:'มินตรา',surname:'ดวงดี',cls:'ป.4',room:'1',balance:0,dob:'2558-07-22',parentPhone:'082-222-2222',accountNo:'SAV-002',openDate:'01/05/2568',status:'active'},
-    {id:'STD003',no:3,prefix:'ด.ช.',name:'วิชัย',surname:'แก้วมณี',cls:'ป.4',room:'1',balance:0,dob:'2558-11-05',parentPhone:'083-333-3333',accountNo:'SAV-003',openDate:'01/05/2568',status:'active'},
-    {id:'STD004',no:4,prefix:'ด.ญ.',name:'สุดา',surname:'รุ่งเรือง',cls:'ป.5',room:'1',balance:0,dob:'2557-06-10',parentPhone:'084-444-4444',accountNo:'SAV-004',openDate:'01/05/2568',status:'active'},
-    {id:'STD005',no:5,prefix:'ด.ช.',name:'ภูมิ',surname:'ทองสี',cls:'ป.5',room:'1',balance:0,dob:'2557-09-18',parentPhone:'085-555-5555',accountNo:'SAV-005',openDate:'01/05/2568',status:'active'},
-    {id:'STD006',no:6,prefix:'ด.ญ.',name:'นภา',surname:'เมืองแมน',cls:'ป.6',room:'1',balance:0,dob:'2556-02-28',parentPhone:'086-666-6666',accountNo:'SAV-006',openDate:'01/05/2568',status:'active'},
-    {id:'STD007',no:7,prefix:'ด.ช.',name:'กิตติ',surname:'ใจดี',cls:'ป.6',room:'1',balance:0,dob:'2556-12-01',parentPhone:'087-777-7777',accountNo:'SAV-007',openDate:'01/05/2568',status:'active'},
-  ]);
+  LS.set('sav_students',[]);
   LS.set('sav_transactions',[]);
   LS.set('sav_withdraw_requests',[]);
   LS.set('sav_audit',[]);
   LS.set('sav_seeded',true);
+}
+
+// รายการนักเรียนตัวอย่าง (demo) ที่ต้องล้างทิ้งถาวร ไม่ให้กลับมาผ่านการ merge
+const DEMO_STUDENT_IDS=new Set(['STD001','STD002','STD003','STD004','STD005','STD006','STD007']);
+function purgeDemoStudents(){
+  const hasTx=new Set((state.transactions||[]).map(t=>t.studentId));
+  const before=(state.students||[]).length;
+  // ลบเฉพาะ demo ที่ไม่มีรายการฝาก/ถอน (กันเผลอลบข้อมูลจริง)
+  state.students=(state.students||[]).filter(s=>!(DEMO_STUDENT_IDS.has(s.id)&&!hasTx.has(s.id)));
+  return (state.students||[]).length!==before;
 }
 seedData();
 
@@ -2049,10 +2051,12 @@ function renderAudit(){
 // ══════════════════════════════════════════════════════
 (async function init(){
   migrateDatesToCE();       // แปลงข้อมูลในเครื่อง (ถ้าเป็น พ.ศ.) → ค.ศ. ก่อนแสดงผล
+  purgeDemoStudents();      // ล้างนักเรียนตัวอย่างในเครื่อง
   render();
   const loaded=await cloudLoad(); // ดึงข้อมูลล่าสุดจาก Google Sheets
   const changed=migrateDatesToCE(); // แปลงข้อมูลที่ดึงจากชีต (ถ้ายังเป็น พ.ศ.)
-  if(changed && cloudReady) save(); // เขียนข้อมูลที่แปลงแล้วกลับขึ้นชีตให้ถาวร
+  const purged=purgeDemoStudents(); // ล้างนักเรียนตัวอย่างที่อาจมากับชีต/merge
+  if((changed||purged) && cloudReady) save(); // เขียนข้อมูลที่แก้แล้วกลับขึ้นชีตให้ถาวร
   render();
   if(!API_URL) setSyncStatus('off');
 })();
