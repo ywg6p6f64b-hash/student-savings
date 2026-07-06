@@ -232,10 +232,22 @@ function persistLocal(){
   LS.set('sav_audit',state.audit);
 }
 
-// รายการที่ถูกลบ (tombstone) — เก็บในเครื่อง กันไม่ให้ถูกดึงกลับมาตอน merge
-let txTombstones = LS.get('sav_tx_tombstones', []);
-function addTombstone(id){ if(id && !txTombstones.includes(id)){ txTombstones.push(id); LS.set('sav_tx_tombstones', txTombstones); } }
-function dropTombstoned(arr){ const s=new Set(txTombstones); return (arr||[]).filter(t=>t&&!s.has(t.id)); }
+// รายการที่ถูกลบ — ซิงก์ข้ามเครื่องผ่าน Audit Log (เครื่องอื่นอ่านแล้วรู้ว่าถูกลบ)
+let deletedIds = LS.get('sav_deleted', []);
+function delSet(){ return new Set(deletedIds.map(String)); }
+function addTombstone(id){ if(id!=null && !deletedIds.map(String).includes(String(id))){ deletedIds.push(String(id)); LS.set('sav_deleted', deletedIds); } }
+function dropTombstoned(arr){ const s=delSet(); return (arr||[]).filter(t=>t&&!s.has(String(t.id))); }
+// อ่านรายการลบจาก Audit Log (ช่องทางซิงก์) มาเติมชุด deletedIds
+function syncDeletedFromAudit(){
+  let changed=false;
+  (state.audit||[]).forEach(a=>{
+    if(a && a.action==='DELETE_TX' && a.detail){
+      const m=String(a.detail).match(/\[del:([^\]]+)\]/);
+      if(m && !deletedIds.map(String).includes(String(m[1]))){ deletedIds.push(String(m[1])); changed=true; }
+    }
+  });
+  if(changed) LS.set('sav_deleted', deletedIds);
+}
 
 function cloudPayload(){
   return {
@@ -267,14 +279,7 @@ async function cloudPush(){
     try{
       const remote=await cloudFetchAll();
       if(remote && Array.isArray(remote.users)){
-        state.users        = mergeById(state.users,        remote.users);          // ยึดของในเครื่องก่อน + เติมของเครื่องอื่น
-        state.students     = mergeById(state.students,     remote.students||[]);
-        state.transactions = dropTombstoned(mergeById(state.transactions, remote.transactions||[]));
-        state.withdrawReqs = mergeById(state.withdrawReqs, remote.withdrawReqs||[]);
-        state.audit        = mergeById(state.audit,        remote.audit||[]);
-        recomputeBalances();
-        purgeDemoStudents();
-        persistLocal();
+        mergeRemoteInto(remote, true); // ยึดของในเครื่องก่อน + เติมของเครื่องอื่น + ปรับใช้รายการที่ลบ
       }
     }catch(e){ /* อ่านชีตไม่ได้ → เขียนด้วยข้อมูลในเครื่องล้วน */ }
 
@@ -333,6 +338,20 @@ function recomputeBalances(){
   });
   state.students=(state.students||[]).map(s=>cnt[s.id]?{...s,balance:sum[s.id]}:s);
 }
+// รวมข้อมูลจากชีตเข้ากับข้อมูลในเครื่อง (preferLocal=true ตอนบันทึก, =false ตอนโหลด)
+function mergeRemoteInto(remote, preferLocal){
+  const pick=(localArr,remoteArr)=> preferLocal ? mergeById(localArr,remoteArr) : mergeById(remoteArr,localArr);
+  state.users        = pick(state.users,        remote.users||[]);
+  state.students     = pick(state.students,     remote.students||[]);
+  state.transactions = pick(state.transactions, remote.transactions||[]);
+  state.withdrawReqs = pick(state.withdrawReqs, remote.withdrawReqs||[]);
+  state.audit        = pick(state.audit,        remote.audit||[]);
+  syncDeletedFromAudit();                              // เรียนรู้รายการที่ถูกลบจากทุกเครื่อง
+  state.transactions = dropTombstoned(state.transactions); // เอารายการที่ถูกลบออก
+  recomputeBalances();
+  purgeDemoStudents();
+  persistLocal();
+}
 
 async function cloudLoad(){
   if(!API_URL) return false;
@@ -342,21 +361,19 @@ async function cloudLoad(){
     if(!data || !Array.isArray(data.users)) throw new Error('รูปแบบข้อมูลไม่ถูกต้อง');
     const hasData=(data.users.length>0)||(Array.isArray(data.students)&&data.students.length>0);
     if(hasData){
-      const rTx=(data.transactions||[]).length, rStu=(data.students||[]).length,
-            rWd=(data.withdrawReqs||[]).length, rUsr=(data.users||[]).length, rAud=(data.audit||[]).length;
-      // ★ รวมแบบ merge: ไม่ทับข้อมูลในเครื่องด้วยของว่างจากชีต (กันข้อมูลหาย)
-      state.users=mergeById(data.users,state.users);
-      state.students=mergeById(data.students||[],state.students);
-      state.transactions=mergeById(data.transactions||[],state.transactions);
-      state.withdrawReqs=mergeById(data.withdrawReqs||[],state.withdrawReqs);
-      state.audit=mergeById(data.audit||[],state.audit);
-      recomputeBalances(); // ปรับยอดคงเหลือให้ตรงกับรายการฝาก/ถอนหลังรวมข้อมูล
-      persistLocal();
+      // ★ รวมแบบ merge (ยึดชีตเป็นหลัก) + เรียนรู้รายการที่ถูกลบ ไม่ทับข้อมูลในเครื่องด้วยของว่าง
+      mergeRemoteInto(data, false);
       cloudReady=true;
       setSyncStatus('ok','☁️ เชื่อมต่อ Google Sheets แล้ว');
-      // ถ้าในเครื่องมีรายการที่ชีตยังไม่มี → ดันขึ้นไปเติมให้ครบ
-      const needPush = state.transactions.length>rTx || state.students.length>rStu ||
-                       state.withdrawReqs.length>rWd || state.users.length>rUsr || state.audit.length>rAud;
+      // ต้องดันขึ้นชีตถ้า: ในเครื่องมีรายการที่ชีตยังไม่มี หรือ ชีตยังมีรายการที่ถูกลบไปแล้ว
+      const remoteTxIds=new Set((data.transactions||[]).map(t=>String(t.id)));
+      const del=delSet();
+      const needPush =
+        state.transactions.some(t=>!remoteTxIds.has(String(t.id))) ||        // มีรายการใหม่ที่ชีตยังไม่มี
+        (data.transactions||[]).some(t=>del.has(String(t.id))) ||            // ชีตยังมีรายการที่ถูกลบ
+        state.students.length>(data.students||[]).length ||
+        state.users.length>(data.users||[]).length ||
+        state.audit.length>(data.audit||[]).length;
       if(needPush) cloudSave();
       return true;
     }
@@ -1531,7 +1548,7 @@ function attachHistory(){
       }
       state.transactions=state.transactions.filter(x=>x.id!==t.id);
       addTombstone(t.id); // กันไม่ให้ merge ดึงรายการที่ลบกลับมา
-      addAudit('DELETE_TX',`ลบรายการ${t.type==='deposit'?'ฝาก':'ถอน'} ${money(t.amount)}${s?' ของ '+s.name+' '+s.surname:''}`);
+      addAudit('DELETE_TX',`ลบรายการ${t.type==='deposit'?'ฝาก':'ถอน'} ${money(t.amount)}${s?' ของ '+s.name+' '+s.surname:''} [del:${t.id}]`);
       save();showToast('ลบรายการแล้ว');
       document.getElementById('content').innerHTML=renderHistory();attachHistory();
     };
@@ -2071,6 +2088,8 @@ function renderAudit(){
 // ══════════════════════════════════════════════════════
 (async function init(){
   migrateDatesToCE();       // แปลงข้อมูลในเครื่อง (ถ้าเป็น พ.ศ.) → ค.ศ. ก่อนแสดงผล
+  syncDeletedFromAudit();   // เรียนรู้รายการที่ถูกลบ (จาก audit ในเครื่อง)
+  state.transactions=dropTombstoned(state.transactions);
   purgeDemoStudents();      // ล้างนักเรียนตัวอย่างในเครื่อง
   render();
   const loaded=await cloudLoad(); // ดึงข้อมูลล่าสุดจาก Google Sheets
